@@ -81,6 +81,31 @@ public class FactoryTest {
     }
 
     @Test
+    public void should_start_auto_startable_in_order() throws Exception {
+        final LifecycleComponent lifecycleComponent1 = new LifecycleComponent();
+        final boolean[] l2Started = new boolean[1];
+        final boolean[] wasL1Started = new boolean[1];
+        Factory factory = Factory.builder()
+                .addMachine(new SingletonFactoryMachine<>(10, NamedComponent.of(
+                        AutoStartable.class, "t0", new AutoStartable() {
+                            @Override
+                            public void start() {
+                                wasL1Started[0] = lifecycleComponent1.started;
+                                l2Started[0] = true;
+                            }
+                        }
+                )))
+                .addMachine(new SingletonFactoryMachine<>(0, NamedComponent.of(
+                        AutoStartable.class, "t1", lifecycleComponent1)))
+                .build();
+        factory.start();
+
+        assertThat(lifecycleComponent1.started).isTrue();
+        assertThat(l2Started[0]).isTrue();
+        assertThat(wasL1Started[0]).isTrue();
+    }
+
+    @Test
     public void should_prepare_auto_preparable() throws Exception {
         LifecycleComponent lifecycleComponent = new LifecycleComponent();
         Factory factory = Factory.builder().addMachine(new SingletonFactoryMachine<>(0,
@@ -523,6 +548,23 @@ public class FactoryTest {
         threadLocal().set(Factory.activationKey(A.class, "name2"), "false");
         factory = Factory.newInstance();
         assertThat(factory.queryByName(Name.of(Object.class, "name2")).findOne().isPresent()).isFalse();
+    }
+
+    @Test
+    public void should_allow_to_deactivate_components_from_provided_warehouse() throws Exception {
+        Factory factory = Factory.builder().addMachine(
+                new SingletonFactoryMachine<>(0, NamedComponent.of(A.class, "a", new A("v1")))).build();
+
+        Set<A> components = factory.getComponents(A.class);
+        assertThat(components).hasSize(1).extracting("a").containsExactly("v1");
+
+        Factory newFactory = Factory.builder().addWarehouseProvider(factory.getWarehouse())
+                .addMachine(new SingletonFactoryMachine<>(0,
+                        NamedComponent.of(String.class, Factory.activationKey(A.class, "a"), "false")))
+                .addMachine(new SingletonFactoryMachine<>(0, NamedComponent.of(A.class, "b", new A("v2")))).build();
+
+        components = newFactory.getComponents(A.class);
+        assertThat(components).hasSize(1).extracting("a").containsExactly("v2");
     }
 
     @After

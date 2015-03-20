@@ -2,6 +2,7 @@ package restx;
 
 import com.google.common.base.Optional;
 import com.google.common.base.Splitter;
+import com.google.common.base.StandardSystemProperty;
 import com.google.common.collect.ImmutableList;
 import com.google.common.eventbus.EventBus;
 import com.google.common.eventbus.Subscribe;
@@ -29,6 +30,7 @@ import static com.google.common.collect.Iterables.transform;
  */
 public class Apps {
     private static final Logger logger = LoggerFactory.getLogger(Apps.class);
+    private static final String PATH_SEP = StandardSystemProperty.PATH_SEPARATOR.value();
 
     public static Apps with(AppSettings appSettings) {
         return new Apps(appSettings);
@@ -41,6 +43,12 @@ public class Apps {
     }
 
     public CompilationManager newAppCompilationManager(EventBus eventBus, CompilationSettings compilationSettings) {
+        if (!hasSystemJavaCompiler()) {
+            throw new IllegalStateException(
+                    "trying to setup a compilation manager while no system compiler is available. " +
+                            "This should be prevented by checking the system java compiler first. " +
+                            "Use hasSystemJavaCompiler() to check that before calling this method.");
+        }
         if (hasJavadocTools()) {
             eventBus.register(new Object() {
                 @Subscribe
@@ -106,10 +114,10 @@ public class Apps {
 
     public Process run(File workingDirectory, Path targetClasses, Path dependenciesDir, List<String> vmOptions,
                               String mainClassName, List<String> args, boolean quiet) throws IOException {
-        String classpath = targetClasses.toString() + ":" + dependenciesDir.toString() + "/*";
+        String classpath = targetClasses.toString() + PATH_SEP + dependenciesDir.toString() + "/*";
         File toolsJar = new File(System.getenv("JAVA_HOME") + "/lib/tools.jar");
         if (toolsJar.exists()) {
-            classpath += ":" + toolsJar.getAbsolutePath();
+            classpath += PATH_SEP + toolsJar.getAbsolutePath();
         }
 
         final Process process = new ProcessBuilder(
@@ -142,7 +150,7 @@ public class Apps {
         return process;
     }
 
-    private boolean hasJavadocTools() {
+    public static boolean hasJavadocTools() {
         try {
             Class.forName("com.sun.tools.javadoc.Main");
             return true;
@@ -150,4 +158,14 @@ public class Apps {
             return false;
         }
     }
+
+    public static boolean hasSystemJavaCompiler() {
+        try {
+            Class<?> tp = Class.forName("javax.tools.ToolProvider");
+            return tp.getMethod("getSystemJavaCompiler").invoke(null) != null;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
 }

@@ -307,18 +307,18 @@ public class Factory implements AutoCloseable {
              */
             Factory factory = new Factory(
                     usedServiceLoader, machines, ImmutableList.<ComponentCustomizerEngine>of(),
-                    new Warehouse(ImmutableList.copyOf(providers)));
+                    new StdWarehouse(ImmutableList.copyOf(providers)));
 
             Map<Name<FactoryMachine>, MachineEngine<FactoryMachine>> toBuild = new LinkedHashMap<>();
             ImmutableList<FactoryMachine> factoryMachines = buildFactoryMachines(factory, factory.machines, toBuild);
             while (!factoryMachines.isEmpty()) {
                 machines.putAll("FactoryMachines", factoryMachines);
                 factory = new Factory(usedServiceLoader, machines,
-                        ImmutableList.<ComponentCustomizerEngine>of(), new Warehouse());
+                        ImmutableList.<ComponentCustomizerEngine>of(), new StdWarehouse());
                 factoryMachines = buildFactoryMachines(factory, factoryMachines, toBuild);
             }
             factory = new Factory(usedServiceLoader, machines,
-                    buildCustomizerEngines(factory), new Warehouse(ImmutableList.copyOf(providers)));
+                    buildCustomizerEngines(factory), new StdWarehouse(ImmutableList.copyOf(providers)));
             return factory;
         }
 
@@ -448,7 +448,7 @@ public class Factory implements AutoCloseable {
             return doFind();
         }
         public final Set<T> findAsComponents() {
-            return Sets.newLinkedHashSet(
+            return ImmutableSet.copyOf(
                         Iterables.transform(find(), NamedComponent.<T>toComponent()));
         }
         public abstract Set<Name<T>> findNames();
@@ -719,7 +719,7 @@ public class Factory implements AutoCloseable {
                 // define a Machine to provide a default provider for MetricRegistry
                 // this won't be used if a MetricsRegistry is provided through a higher priority machine
                 .put("MetricRegistryMachine", new SingleNameFactoryMachine<>(10000,
-                        new NoDepsMachineEngine<MetricRegistry>(METRICS_NAME, BoundlessComponentBox.FACTORY) {
+                        new NoDepsMachineEngine<MetricRegistry>(METRICS_NAME, 10000, BoundlessComponentBox.FACTORY) {
                             @Override
                             protected MetricRegistry doNewComponent(SatisfiedBOM satisfiedBOM) {
                                 return new DummyMetricRegistry();
@@ -760,7 +760,7 @@ public class Factory implements AutoCloseable {
         machines.removeAll("WarehouseProvidersMachine");
         machines.put("IndividualMachines", machine);
         return new Factory(usedServiceLoader, machines, customizerEngines,
-                new Warehouse(warehouse.getProviders()));
+                new StdWarehouse(warehouse.getProviders()));
     }
 
     public String getId() {

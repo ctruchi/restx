@@ -18,12 +18,12 @@ public class JongoCollectionFactory implements FactoryMachine {
 
     @Override
     public boolean canBuild(Name<?> name) {
-        return JongoCollection.class.isAssignableFrom(name.getClazz());
+        return JongoCollection.class == name.getClazz();
     }
 
     @Override
     public <T> MachineEngine<T> getEngine(final Name<T> name) {
-        return new StdMachineEngine<T>(name, BoundlessComponentBox.FACTORY) {
+        return new StdMachineEngine<T>(name, priority(), BoundlessComponentBox.FACTORY) {
             @Override
             @SuppressWarnings("unchecked")
             protected T doNewComponent(SatisfiedBOM satisfiedBOM) {

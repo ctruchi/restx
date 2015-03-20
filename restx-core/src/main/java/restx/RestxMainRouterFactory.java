@@ -1,6 +1,11 @@
 package restx;
 
-import com.google.common.base.*;
+import com.google.common.base.Optional;
+import com.google.common.base.Predicate;
+import com.google.common.base.Stopwatch;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
+import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.eventbus.EventBus;
 import com.google.common.eventbus.Subscribe;
@@ -13,7 +18,12 @@ import restx.classloader.CompilationSettings;
 import restx.classloader.HotReloadingClassLoader;
 import restx.common.RestxConfig;
 import restx.common.metrics.api.MetricRegistry;
-import restx.factory.*;
+import restx.factory.Factory;
+import restx.factory.Name;
+import restx.factory.NamedComponent;
+import restx.factory.SingletonFactoryMachine;
+import restx.factory.StdWarehouse;
+import restx.factory.Warehouse;
 import restx.http.HttpStatus;
 import restx.security.RestxSessionCookieFilter;
 import restx.server.WebServer;
@@ -70,6 +80,7 @@ public class RestxMainRouterFactory {
         routers.remove(serverId);
         Optional<Factory> factory = Factory.getFactory(serverId);
         if (factory.isPresent()) {
+            factory.get().close();
             Factory.unregister(serverId, factory.get());
         }
     }
@@ -399,7 +410,7 @@ public class RestxMainRouterFactory {
                 Thread.currentThread().setContextClassLoader(previous);
             }
 
-            Warehouse warehouse = getLoadFactoryMode().equals("cleanrequest") ? new Warehouse() : factory.getWarehouse();
+            Warehouse warehouse = getLoadFactoryMode().equals("cleanrequest") ? new StdWarehouse() : factory.getWarehouse();
 
             RestxMainRouter router = new PerRequestFactoryLoader(serverId, warehouse);
 
@@ -577,7 +588,7 @@ public class RestxMainRouterFactory {
                 logger.info("can't enable hot compile: restx.app.package is not set.\n" +
                         "Run your app with -Drestx.app.package=<app.base.package> to enable hot compile.");
                 return false;
-            } else if (!hasToolsJar()) {
+            } else if (!hasSystemJavaCompiler()) {
                 logger.info("can't enable hot compile: tools.jar is not in classpath.\n" +
                         "Run your app with a JDK rather than a JRE to enable hot compile.");
                 return false;
@@ -589,7 +600,7 @@ public class RestxMainRouterFactory {
                 && !getMode().equals(RestxContext.Modes.PROD)
                 && !getMode().equals(RestxContext.Modes.TEST)
                 && appSettings.appPackage().isPresent()
-                && hasToolsJar();
+                && hasSystemJavaCompiler();
         }
     }
 
@@ -601,13 +612,8 @@ public class RestxMainRouterFactory {
         return restxRequest.getHeader("RestxMode").or(getMode());
     }
 
-    private boolean hasToolsJar() {
-        try {
-            Class.forName("javax.tools.ToolProvider");
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
+    private boolean hasSystemJavaCompiler() {
+        return Apps.hasSystemJavaCompiler();
     }
 
     private boolean useAutoCompile() {

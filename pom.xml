@@ -24,7 +24,7 @@
     </parent>
     <groupId>io.restx</groupId>
     <artifactId>restx-parent</artifactId>
-    <version>0.34-SNAPSHOT</version>
+    <version>0.35-SNAPSHOT</version>
     <packaging>pom</packaging>
     <url>http://restx.io</url>
     <licenses>
@@ -158,6 +158,8 @@
         <module>restx-shell-manager</module>
         <module>restx-build-shell</module>
         <module>restx-specs-shell</module>
+        <module>restx-validation</module>
+        <module>restx-webjars</module>
     </modules>
 
 

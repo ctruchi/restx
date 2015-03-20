@@ -42,14 +42,12 @@ import static restx.common.Mustaches.compile;
 @SupportedOptions({ "debug" })
 public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
     final Template componentMachineTpl;
-    final Template alternativeMachineTpl;
     final Template conditionalMachineTpl;
     final Template moduleMachineTpl;
     private final FactoryAnnotationProcessor.ServicesDeclaration machinesDeclaration;
 
     public FactoryAnnotationProcessor() {
         componentMachineTpl = compile(FactoryAnnotationProcessor.class, "ComponentMachine.mustache");
-        alternativeMachineTpl = compile(FactoryAnnotationProcessor.class, "AlternativeMachine.mustache");
         conditionalMachineTpl = compile(FactoryAnnotationProcessor.class, "ConditionalMachine.mustache");
         moduleMachineTpl = compile(FactoryAnnotationProcessor.class, "ModuleMachine.mustache");
         machinesDeclaration = new ServicesDeclaration("restx.factory.FactoryMachine");
@@ -81,35 +79,136 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
                 }
                 TypeElement typeElem = (TypeElement) annotation;
                 Module mod = typeElem.getAnnotation(Module.class);
+                When classWhen = typeElem.getAnnotation(When.class);
 
                 ModuleClass module = new ModuleClass(typeElem.getQualifiedName().toString(), typeElem, mod.priority());
                 for (Element element : typeElem.getEnclosedElements()) {
+
+                    // look for Provides or Alternative elements
                     Provides provides = element.getAnnotation(Provides.class);
+                    Alternative alternative = element.getAnnotation(Alternative.class);
+
                     if (element instanceof ExecutableElement
-                            && element.getKind() == ElementKind.METHOD
-                            && provides != null) {
+                            && element.getKind() == ElementKind.METHOD) {
+
                         ExecutableElement exec = (ExecutableElement) element;
+                        When methodWhen = exec.getAnnotation(When.class);
 
-                        ProviderMethod m = new ProviderMethod(
-                                exec.getReturnType().toString(),
-                                exec.getSimpleName().toString(),
-                                provides.priority() == 0 ? mod.priority() : provides.priority(),
-                                getInjectionName(exec.getAnnotation(Named.class)),
-                                exec);
+                        // multiple cases, provides only, provides with when, and alternative
 
-                        buildInjectableParams(exec, m.parameters);
+                        if (provides != null && methodWhen == null && classWhen == null) {
+                            // add a provider method to the module
+                            processProviderMethod(mod, module, provides, exec);
+                        } else {
 
-                        buildCheckedExceptions(exec, m.exceptions);
+                            // When can be either defined at class level, or on the method. But both are not allowed.
+                            When whenToUse;
+                            if (classWhen != null) {
+                                if (methodWhen != null) {
+                                    error("the module class is annotated with @When, so methods are not allowed to be annotated with @When", exec);
+                                    continue;
+                                }
+                                whenToUse = classWhen;
+                            } else {
+                                whenToUse = methodWhen;
+                            }
 
-                        module.providerMethods.add(m);
+                            if (provides != null) {
+                                // we need to create a conditional provider method
+                                processConditionalProviderMethod(
+                                        mod,
+                                        module,
+                                        exec.getReturnType().toString(),
+                                        getInjectionName(exec.getAnnotation(Named.class)).or(exec.getSimpleName().toString()),
+                                        provides.priority() == 0 ? mod.priority() : provides.priority(),
+                                        whenToUse,
+                                        "Conditional",
+                                        exec
+                                );
+                            } else if (alternative != null) {
+                                // when annotation is required with alternative
+                                if (whenToUse == null) {
+                                    error("an Alternative MUST be annotated with @When to tell when it must be activated, or the whole module must be annotated with @When", exec);
+                                    continue;
+                                }
+
+                                TypeElement alternativeTo = null;
+                                try {
+                                    alternative.to();
+                                } catch (MirroredTypeException mte) {
+                                    alternativeTo = asTypeElement(mte.getTypeMirror());
+                                }
+
+                                String namedAttribute = alternative.named();
+                                Optional<String> injectionName = getInjectionName(alternativeTo.getAnnotation(Named.class));
+                                String componentName;
+                                if (!namedAttribute.isEmpty()) {
+                                    // the conditional component name is the one specified in @Alternative annotation
+                                    componentName = namedAttribute;
+                                } else if (injectionName.isPresent()) {
+                                    //  or the Name of the reference class
+                                    componentName = injectionName.get();
+                                } else {
+                                    // or the simple name of the produced class
+                                    componentName = alternativeTo.getSimpleName().toString();
+                                }
+
+                                // add a conditional provider method to the module
+                                processConditionalProviderMethod(
+                                        mod,
+                                        module,
+                                        alternativeTo.getQualifiedName().toString(),
+                                        componentName,
+                                        alternative.priority(),
+                                        whenToUse,
+                                        "Alternative",
+                                        exec
+                                );
+                            }
+                        }
                     }
                 }
 
+                // finally generate the machine with all methods found
                 generateMachineFile(module);
             } catch (IOException e) {
                 fatalError("error when processing " + annotation, e, annotation);
             }
         }
+    }
+
+    private void processProviderMethod(Module mod, ModuleClass module, Provides provides, ExecutableElement exec) {
+        ProviderMethod m = new ProviderMethod(
+				exec.getReturnType().toString(),
+				exec.getSimpleName().toString(),
+				provides.priority() == 0 ? mod.priority() : provides.priority(),
+				getInjectionName(exec.getAnnotation(Named.class)),
+				exec);
+
+        buildInjectableParams(exec, m.parameters);
+
+        buildCheckedExceptions(exec, m.exceptions);
+
+        module.providerMethods.add(m);
+    }
+
+    private void processConditionalProviderMethod(Module mod, ModuleClass module, String componentType,
+            String componentName, int priority, When when, String factoryMachineNameSuffix, ExecutableElement exec) {
+        ConditionalProviderMethod m = new ConditionalProviderMethod(
+                componentType,
+                componentName,
+                exec.getSimpleName().toString(),
+                priority == 0 ? mod.priority() : priority,
+                when.name(),
+                when.value(),
+                factoryMachineNameSuffix,
+                exec);
+
+        buildInjectableParams(exec, m.parameters);
+
+        buildCheckedExceptions(exec, m.exceptions);
+
+        module.conditionalProviderMethods.add(m);
     }
 
     private void processMachines(RoundEnvironment roundEnv) throws IOException {
@@ -140,12 +239,26 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
 
                 ExecutableElement exec = findInjectableConstructor(component);
 
+                Component componentAnnotation = component.getAnnotation(Component.class);
+
+                TypeElement asClass = null;
+                try {
+                    componentAnnotation.asClass();
+                } catch (MirroredTypeException mte) {
+                    asClass = asTypeElement(mte.getTypeMirror());
+                }
+                if (asClass == null) {
+                    // no class as been forced, so use the annotated class
+                    asClass = component;
+                }
+
                 ComponentClass componentClass = new ComponentClass(
                         component.getQualifiedName().toString(),
                         getPackage(component).getQualifiedName().toString(),
                         component.getSimpleName().toString(),
+                        asClass.getQualifiedName().toString(),
                         getInjectionName(component.getAnnotation(Named.class)),
-                        component.getAnnotation(Component.class).priority(),
+                        componentAnnotation.priority(),
                         component);
 
                 buildInjectableParams(exec, componentClass.parameters);
@@ -165,6 +278,11 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
     private void processAlternatives(RoundEnvironment roundEnv) throws IOException {
         for (Element elem : roundEnv.getElementsAnnotatedWith(Alternative.class)) {
             try {
+                if (elem instanceof ExecutableElement && elem.getKind() == ElementKind.METHOD) {
+                    // skip this annotation, if it is in a module, it will been managed by processModules
+                    continue;
+                }
+
                 if (!(elem instanceof TypeElement)) {
                     error("annotating element " + elem + " of type " + elem.getKind().name()
                                     + " with @Alternative is not supported", elem);
@@ -184,6 +302,18 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
                     }
                 }
 
+                // generate the name for the alternative, could be:
+                // - the "named" value if defined
+                // - the value of @Named of the referenced component if defined
+                // - the referenced component simple name class, if none of the above
+                String namedAttribute = alternative.named();
+                Optional<String> injectionName;
+                if (!namedAttribute.isEmpty()) {
+                    injectionName = Optional.of(namedAttribute);
+                } else {
+                    injectionName = getInjectionName(alternativeTo.getAnnotation(Named.class));
+                }
+
                 ComponentClass componentClass = new ComponentClass(
                         component.getQualifiedName().toString(),
                         getPackage(component).getQualifiedName().toString(),
@@ -196,7 +326,7 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
                         alternativeTo.getQualifiedName().toString(),
                         getPackage(alternativeTo).getQualifiedName().toString(),
                         alternativeTo.getSimpleName().toString(),
-                        getInjectionName(alternativeTo.getAnnotation(Named.class)),
+                        injectionName,
                         alternative.priority(),
                         alternativeTo);
 
@@ -204,6 +334,11 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
                 if (when == null) {
                     error("an Alternative MUST be annotated with @When to tell when it must be activated", elem);
                     continue;
+                }
+
+                Named named = component.getAnnotation(Named.class);
+                if (named != null) {
+                    warn("to specify a 'name' for an Alternative use 'named' attribute, Named annotation will be ignored", elem);
                 }
 
                 buildInjectableParams(exec, componentClass.parameters);
@@ -234,7 +369,7 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
 
     private void buildCheckedExceptions(ExecutableElement executableElement, List<String> exceptions) {
     	for (TypeMirror e : executableElement.getThrownTypes()) {
-    		// Assuming Exceptions never have type arguments. Qualified names include type arguments.
+            // Assuming Exceptions never have type arguments. Qualified names include type arguments.
     		String exception = ((TypeElement) ((DeclaredType) e).asElement()).getQualifiedName().toString();
     		exceptions.add(exception);
     	}
@@ -256,6 +391,7 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
 
     private void generateMachineFile(ModuleClass moduleClass) throws IOException {
         List<ImmutableMap<String, Object>> engines = Lists.newArrayList();
+        List<ImmutableMap<String, Object>> conditionalsEngines = Lists.newArrayList();
 
         for (ProviderMethod method : moduleClass.providerMethods) {
             engines.add(ImmutableMap.<String, Object>builder()
@@ -271,6 +407,22 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
                     .build());
         }
 
+        for (ConditionalProviderMethod method : moduleClass.conditionalProviderMethods) {
+            conditionalsEngines.add(ImmutableMap.<String, Object>builder()
+                    .put("componentType", method.componentType)
+                    .put("componentName", method.componentName)
+                    .put("conditionalFactoryMachineName", method.methodName + method.componentName + method.factoryMachineNameSuffix)
+                    .put("whenName", method.whenName)
+                    .put("whenValue", method.whenValue)
+                    .put("priority", method.priority)
+                    .put("queriesDeclarations", Joiner.on("\n").join(buildQueriesDeclarationsCode(method.parameters)))
+                    .put("methodName", method.methodName)
+                    .put("queries", Joiner.on(",\n").join(buildQueriesNames(method.parameters)))
+                    .put("parameters", Joiner.on(",\n").join(buildParamFromSatisfiedBomCode(method.parameters)))
+                    .put("exceptions", method.exceptions.isEmpty() ? false : Joiner.on("|").join(method.exceptions))
+                    .build());
+        }
+
         ImmutableMap<String, Object> ctx = ImmutableMap.<String, Object>builder()
                 .put("package", moduleClass.pack)
                 .put("machine", moduleClass.name + "FactoryMachine")
@@ -278,46 +430,47 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
                 .put("moduleType", moduleClass.name)
                 .put("priority", moduleClass.priority)
                 .put("engines", engines)
+                .put("conditionalsEngines", conditionalsEngines)
                 .build();
 
         generateJavaClass(moduleClass.fqcn + "FactoryMachine", moduleMachineTpl, ctx,
                 Collections.singleton(moduleClass.originatingElement));
     }
 
-
     private void generateMachineFile(ComponentClass componentClass, ComponentClass alternativeTo, When when) throws IOException {
-        ImmutableMap<String, String> ctx = ImmutableMap.<String, String>builder()
+        ImmutableMap<String, Object> ctx = ImmutableMap.<String, Object>builder()
                 .put("package", componentClass.pack)
                 .put("machine", componentClass.name + "FactoryMachine")
-                .put("componentFqcn", componentClass.fqcn)
+                .put("imports", ImmutableList.of(componentClass.fqcn, alternativeTo.fqcn))
                 .put("componentType", componentClass.name)
+                .put("componentInjectionType", alternativeTo.name)
                 .put("priority", String.valueOf(componentClass.priority))
                 .put("whenName", when.name())
                 .put("whenValue", when.value())
-                .put("componentInjectionName", componentClass.injectionName.or(componentClass.name))
-                .put("alternativeToComponentFqcn", alternativeTo.fqcn)
-                .put("alternativeToComponentType", alternativeTo.name)
-                .put("alternativeToComponentName", alternativeTo.injectionName.or(alternativeTo.name))
+                .put("componentInjectionName", alternativeTo.injectionName.or(alternativeTo.name))
+                .put("conditionalFactoryMachineName", componentClass.name + alternativeTo.name + "Alternative")
                 .put("queriesDeclarations", Joiner.on("\n").join(buildQueriesDeclarationsCode(componentClass.parameters)))
                 .put("queries", Joiner.on(",\n").join(buildQueriesNames(componentClass.parameters)))
                 .put("parameters", Joiner.on(",\n").join(buildParamFromSatisfiedBomCode(componentClass.parameters)))
                 .build();
 
-        generateJavaClass(componentClass.pack + "." + componentClass.name + "FactoryMachine", alternativeMachineTpl, ctx,
+        generateJavaClass(componentClass.pack + "." + componentClass.name + "FactoryMachine", conditionalMachineTpl, ctx,
                 Collections.singleton(componentClass.originatingElement));
     }
 
     private void generateMachineFile(ComponentClass componentClass, When when) throws IOException {
-        ImmutableMap<String, String> ctx = ImmutableMap.<String, String>builder()
+        ImmutableMap<String, Object> ctx = ImmutableMap.<String, Object>builder()
                 .put("package", componentClass.pack)
                 .put("machine", componentClass.name + "FactoryMachine")
-                .put("componentFqcn", componentClass.fqcn)
+                .put("imports", ImmutableList.of(componentClass.fqcn))
                 .put("componentType", componentClass.name)
+                .put("componentInjectionType", componentClass.producedName)
                 .put("priority", String.valueOf(componentClass.priority))
                 .put("whenName", when.name())
                 .put("whenValue", when.value())
                 .put("componentInjectionName", componentClass.injectionName.isPresent() ?
                         componentClass.injectionName.get() : componentClass.name)
+                .put("conditionalFactoryMachineName", componentClass.name + componentClass.name + "Conditional")
                 .put("queriesDeclarations", Joiner.on("\n").join(buildQueriesDeclarationsCode(componentClass.parameters)))
                 .put("queries", Joiner.on(",\n").join(buildQueriesNames(componentClass.parameters)))
                 .put("parameters", Joiner.on(",\n").join(buildParamFromSatisfiedBomCode(componentClass.parameters)))
@@ -333,6 +486,7 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
                 .put("machine", componentClass.name + "FactoryMachine")
                 .put("componentFqcn", componentClass.fqcn)
                 .put("componentType", componentClass.name)
+                .put("componentProducedType", componentClass.producedName)
                 .put("priority", String.valueOf(componentClass.priority))
                 .put("componentInjectionName", componentClass.injectionName.isPresent() ?
                         componentClass.injectionName.get() : componentClass.name)
@@ -377,11 +531,18 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
         final Element originatingElement;
         final String pack;
         final String name;
+        final String producedName;
         final int priority;
         final Optional<String> injectionName;
 
         ComponentClass(String fqcn,
-                       String pack, String name,
+                String pack, String name,
+                Optional<String> injectionName, int priority, Element originatingElement) {
+            this(fqcn, pack, name, name, injectionName, priority, originatingElement);
+        }
+
+        ComponentClass(String fqcn,
+                       String pack, String name, String producedName,
                        Optional<String> injectionName, int priority, Element originatingElement) {
             this.fqcn = fqcn;
             this.injectionName = injectionName;
@@ -389,8 +550,11 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
 
             this.pack = pack;
             this.name = name;
+            this.producedName = producedName;
             this.originatingElement = originatingElement;
         }
+
+
     }
 
     private static class InjectableParameter {
@@ -503,6 +667,7 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
         final String fqcn;
 
         final List<ProviderMethod> providerMethods = Lists.newArrayList();
+        final List<ConditionalProviderMethod> conditionalProviderMethods = Lists.newArrayList();
         final Element originatingElement;
         final String pack;
         final String name;
@@ -532,6 +697,32 @@ public class FactoryAnnotationProcessor extends RestxAbstractProcessor {
             this.priority = priority;
             this.injectionName = injectionName;
             this.originatingElement = originatingElement;
+        }
+    }
+
+    private static class ConditionalProviderMethod {
+        final Element originatingElement;
+        final String componentType;
+        final String componentName;
+        final String methodName;
+        final int priority;
+        final String whenName;
+        final String whenValue;
+        final String factoryMachineNameSuffix;
+        final List<InjectableParameter> parameters = Lists.newArrayList();
+        final List<String> exceptions = Lists.newArrayList();
+
+        ConditionalProviderMethod(String componentType,
+                String componentName, String methodName, int priority,
+                String whenName, String whenValue, String factoryMachineNameSuffix, Element originatingElement) {
+            this.componentType = componentType;
+            this.componentName = componentName;
+            this.methodName = methodName;
+            this.priority = priority;
+            this.whenName = whenName;
+            this.whenValue = whenValue;
+            this.originatingElement = originatingElement;
+            this.factoryMachineNameSuffix = factoryMachineNameSuffix;
         }
     }
 
